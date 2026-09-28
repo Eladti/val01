@@ -32,6 +32,9 @@ class SimTransport(Transport):
         self._rx = bytearray()
 
     def write(self, data: bytes) -> None:
+        # Timing model: bytes within one write() arrive back to back, and the
+        # gap before each write() is longer than the DUT's inter-byte timeout.
+        self.dut.on_idle()
         self._rx += self.dut.feed(data)
 
     def read(self, n: int) -> bytes:

@@ -32,6 +32,6 @@ pytest -m dut -v          # DUT tests only
 ## Status
 
 - [x] Protocol spec, simulator, client, target-agnostic tests, CI
-- [ ] Fault injection & client retry policy
+- [x] Fault injection & client retry policy (found and fixed DEF-001, see test plan)
 - [ ] Arduino firmware + hardware-in-the-loop runs
 - [ ] Test report generation

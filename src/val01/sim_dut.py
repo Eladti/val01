@@ -44,6 +44,13 @@ class SimDut:
         return self._regs[addr]
 
     # ---- frame handling ------------------------------------------------
+    def _count_error(self) -> None:
+        self._regs[Reg.ERR_COUNT] = min(self._regs[Reg.ERR_COUNT] + 1, 0xFF)
+
+    def on_idle(self) -> None:
+        """Inter-byte timeout expired: drop any partially received frame."""
+        self._rx.clear()
+
     def feed(self, data: bytes) -> bytes:
         """Push received bytes in; return any response bytes produced."""
         out = bytearray()
@@ -54,7 +61,10 @@ class SimDut:
             if len(self._rx) >= HEADER_LEN:
                 length = self._rx[3]
                 if length > MAX_PAYLOAD:
-                    out += build_response(Status.BAD_LEN, self._rx[2])
+                    # Can't find the CRC without a valid LEN, so integrity is unknown.
+                    # Never answer an unverified frame: drop it silently, count it,
+                    # and let the host time out and retry.
+                    self._count_error()
                     self._rx.clear()
                     continue
                 if len(self._rx) == HEADER_LEN + length + 1:
@@ -66,7 +76,7 @@ class SimDut:
         cmd, addr, length = frame[1], frame[2], frame[3]
         payload = frame[4:-1]
         if crc8(frame[1:-1]) != frame[-1]:
-            self._regs[Reg.ERR_COUNT] = min(self._regs[Reg.ERR_COUNT] + 1, 0xFF)
+            self._count_error()
             return build_response(Status.BAD_CRC, addr)
 
         if cmd == Cmd.RESET:

@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from collections import Counter
+
 from .protocol import HEADER_LEN, Cmd, ProtocolError, Response, Status, build_request, parse_response
 from .registers import Reg
 from .transport import Transport
@@ -21,8 +23,18 @@ class DutTimeout(Exception):
 
 
 class DutClient:
-    def __init__(self, transport: Transport):
+    """
+    retries: extra attempts after a link-level failure (timeout, corrupted
+    response, or BAD_CRC meaning the request was corrupted). Retrying is safe
+    because every command is idempotent (docs/protocol.md). Other error
+    statuses are real DUT answers and are never retried.
+    Default 0, so conformance tests see raw DUT behavior.
+    """
+
+    def __init__(self, transport: Transport, retries: int = 0):
         self.t = transport
+        self.retries = retries
+        self.stats: Counter[str] = Counter()
 
     # ---- low level -----------------------------------------------------
     def send_raw(self, frame: bytes) -> Response:
@@ -38,7 +50,24 @@ class DutClient:
         return parse_response(header + rest)
 
     def _transact(self, cmd: Cmd, addr: int, payload: bytes = b"") -> Response:
-        rsp = self.send_raw(build_request(cmd, addr, payload))
+        frame = build_request(cmd, addr, payload)
+        for _ in range(self.retries + 1):
+            self.stats["attempts"] += 1
+            try:
+                rsp = self.send_raw(frame)
+            except (DutTimeout, ProtocolError) as exc:
+                self.stats[type(exc).__name__] += 1
+                last_exc: Exception = exc
+                continue
+            if rsp.status == Status.BAD_CRC:
+                self.stats["BAD_CRC"] += 1
+                last_exc = DutError(rsp.status, addr)
+                continue
+            break
+        else:
+            self.stats["gave_up"] += 1
+            raise last_exc
+
         if rsp.addr != (addr & 0xFF):
             raise ProtocolError(f"addr echo mismatch: sent 0x{addr:02X}, got 0x{rsp.addr:02X}")
         if rsp.status != Status.OK:

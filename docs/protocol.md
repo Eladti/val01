@@ -1,4 +1,4 @@
-# VAL01 DUT Protocol Specification — v0.1
+# VAL01 DUT Protocol Specification — v0.2
 
 Single source of truth for the host ↔ DUT link. The Python simulator
 (`src/val01/sim_dut.py`) and the Arduino firmware (later) both implement
@@ -17,7 +17,7 @@ Request (host → DUT):
 | 0    | SOF     | `0xA5`                             |
 | 1    | CMD     | see Commands                       |
 | 2    | ADDR    | register address                   |
-| 3    | LEN     | payload length, 0..4               |
+| 3    | LEN     | payload length, 0..4 (see Framing errors) |
 | 4..  | PAYLOAD | LEN bytes                          |
 | last | CRC8    | over bytes 1..(3+LEN), excludes SOF |
 
@@ -25,6 +25,17 @@ Response (DUT → host): same layout, with SOF `0x5A` and STATUS in place of CMD
 
 CRC-8: poly `0x07`, init `0x00`, no reflection, no final XOR
 (CRC-8/SMBUS). Check value for ASCII `"123456789"` is `0xF4`.
+
+## Framing errors and timing
+
+- **Inter-byte timeout (20 ms):** if a frame stops arriving partway through, the DUT
+  discards the partial frame once the timeout expires.
+- **LEN > 4:** the DUT cannot locate the CRC, so it cannot verify the frame's
+  integrity. It discards the frame **without responding** and increments ERR_COUNT.
+  The host sees a timeout and retries.
+- Rule: the DUT never returns a semantic status (BAD_CMD / BAD_ADDR / BAD_LEN /
+  READ_ONLY) for a frame whose CRC has not been verified.
+- Bytes before an SOF are skipped (resync after line noise).
 
 ## Commands
 
@@ -56,10 +67,17 @@ CRC-8: poly `0x07`, init `0x00`, no reflection, no final XOR
 | 0x04 | STATUS     | RO     | —     | bit0 LOOP_IN (reads loopback pin)               |
 | 0x05 | ADC_L      | RO     | —     | ADC[7:0]; **reading ADC_L latches ADC_H**       |
 | 0x06 | ADC_H      | RO     | —     | ADC[9:8] (bits 7..2 always 0); latched value    |
-| 0x07 | ERR_COUNT  | RO     | 0x00  | request CRC errors, saturates at 0xFF           |
+| 0x07 | ERR_COUNT  | RO     | 0x00  | CRC + framing errors, saturates at 0xFF         |
 
 The latch rule makes reading ADC_L and then ADC_H return one consistent
 10-bit sample, even while the ADC keeps converting.
 
 Loopback: on hardware, a jumper connects the LOOP_OUT pin to the LOOP_IN pin.
 When the jumper is in place, STATUS.bit0 follows CTRL.bit1.
+
+## Idempotency
+
+Every command is idempotent: sending it twice leaves the DUT in the same state
+as sending it once. ERR_COUNT and the ADC latch are the only side effects, and
+they are diagnostic. So a host can safely retry after a timeout, even if the
+first attempt was actually executed.

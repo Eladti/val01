@@ -1,4 +1,4 @@
-# VAL01 Test Plan — v0.1
+# VAL01 Test Plan — v0.2
 
 Every DUT test carries its ID via `@pytest.mark.tp("<ID>")`. Targets: `sim`
 means it runs on the simulator (CI), `hw` means it runs on the Arduino DUT.
@@ -18,14 +18,39 @@ provide on its own.
 | PROT-002 | Unknown CMD → BAD_CMD                                   | CMD 0x7E                                       | sim, hw  |
 | PROT-003 | Wrong LEN for CMD → BAD_LEN                             | 3 malformed lengths                            | sim, hw  |
 | PROT-004 | DUT resyncs on SOF after line noise                     | garbage prefix before a valid frame            | sim, hw  |
+| PROT-005 | Partial frame discarded after inter-byte gap            | 3 bytes, silence, then a valid frame           | sim, hw  |
+| PROT-006 | LEN > 4 → no response, ERR_COUNT increments             | LEN = 5, 0x20, 0xFF                            | sim, hw  |
 | GPIO-001 | STATUS.LOOP_IN follows CTRL.LOOP_OUT (jumper fitted)    | toggle 0/1/0/1                                 | sim, hw  |
 | GPIO-002 | Open loopback does not follow output                    | model with jumper removed                      | sim only |
 | ADC-001  | ADC value within 0..1023                                | 20 samples                                     | sim, hw  |
 | ADC-002  | ADC_H bits 7..2 read 0                                  | read after latch                               | sim, hw  |
 | ADC-003  | ADC_L read latches ADC_H (coherent 10-bit sample)       | ADC changes between byte reads                 | sim only |
 
+## Fault injection (link robustness)
+
+Faults are injected by `FaultyTransport` (src/val01/faults.py) between client and DUT.
+
+| ID     | Requirement                                                        | Method                                               |
+|--------|--------------------------------------------------------------------|------------------------------------------------------|
+| FI-001 | Every single link fault is detected when retries=0                 | 4 fault types × 10 seeds, expect an exception        |
+| FI-002 | A single fault is recovered with retries=1                         | per fault type, expect a correct value in 2 attempts |
+| FI-003 | Retries exhausted → exception, not a value                         | 3 drops with retries=2                               |
+| FI-004 | Real DUT errors (e.g. BAD_ADDR) are not retried                    | invalid address with retries=3                       |
+| FI-005 | Soak: zero silent corruption, ≥99% completion                      | 2000 random ops, 20% fault rate, retries=3           |
+| FI-006 | Late/stale response is not consumed by the next transaction        | unread response in RX buffer                         |
+
+Expected give-up rate in FI-005 is about p^(r+1) = 0.2^4 = 0.16%, or about 3 of 2000.
+
+### Defect found by fault injection
+
+**DEF-001 — DUT answered BAD_LEN to a corrupted frame.** A single bit flip in LEN
+(0x00 → 0x20) made the DUT answer `BAD_LEN` before checking the CRC. The host
+received what looked like a legitimate rejection and did not retry. In soak,
+14 of 16 failures traced back to this.
+Found by FI-001 (seed 5, flip_req) and the soak-count mismatch.
+Fix: oversize-LEN frames are dropped silently and counted (PROT-006). The soak now
+fails on any non-link DUT status, so this class of defect cannot come back unnoticed.
+
 ## Planned (next steps)
 
-- Fault injection on the link: bit flips, dropped/truncated responses, delays → host detects every one of them and never accepts a corrupted value.
-- Timeout/retry policy in the client.
 - HW target: SerialTransport, Arduino firmware, ADC limits with a known reference (e.g. a voltage divider).
