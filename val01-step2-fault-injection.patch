@@ -1,0 +1,464 @@
+diff --git a/README.md b/README.md
+index 38663df..34dab5e 100644
+--- a/README.md
++++ b/README.md
+@@ -32,6 +32,6 @@ pytest -m dut -v          # DUT tests only
+ ## Status
+ 
+ - [x] Protocol spec, simulator, client, target-agnostic tests, CI
+-- [ ] Fault injection & client retry policy
++- [x] Fault injection & client retry policy (found and fixed DEF-001, see test plan)
+ - [ ] Arduino firmware + hardware-in-the-loop runs
+ - [ ] Test report generation
+diff --git a/docs/protocol.md b/docs/protocol.md
+index bf4fe3f..8efb129 100644
+--- a/docs/protocol.md
++++ b/docs/protocol.md
+@@ -1,4 +1,4 @@
+-# VAL01 DUT Protocol Specification — v0.1
++# VAL01 DUT Protocol Specification — v0.2
+ 
+ Single source of truth for the host ↔ DUT link. The Python simulator
+ (`src/val01/sim_dut.py`) and the Arduino firmware (later) both implement
+@@ -17,7 +17,7 @@ Request (host → DUT):
+ | 0    | SOF     | `0xA5`                             |
+ | 1    | CMD     | see Commands                       |
+ | 2    | ADDR    | register address                   |
+-| 3    | LEN     | payload length, 0..4               |
++| 3    | LEN     | payload length, 0..4 (see Framing errors) |
+ | 4..  | PAYLOAD | LEN bytes                          |
+ | last | CRC8    | over bytes 1..(3+LEN), excludes SOF |
+ 
+@@ -26,6 +26,17 @@ Response (DUT → host): same layout, with SOF `0x5A` and STATUS in place of CMD
+ CRC-8: poly `0x07`, init `0x00`, no reflection, no final XOR
+ (CRC-8/SMBUS). Check value for ASCII `"123456789"` is `0xF4`.
+ 
++## Framing errors and timing
++
++- **Inter-byte timeout (20 ms):** if a frame stops arriving partway through, the DUT
++  discards the partial frame once the timeout expires.
++- **LEN > 4:** the DUT cannot locate the CRC, so it cannot verify the frame's
++  integrity. It discards the frame **without responding** and increments ERR_COUNT.
++  The host sees a timeout and retries.
++- Rule: the DUT never returns a semantic status (BAD_CMD / BAD_ADDR / BAD_LEN /
++  READ_ONLY) for a frame whose CRC has not been verified.
++- Bytes before an SOF are skipped (resync after line noise).
++
+ ## Commands
+ 
+ | CMD  | Name  | Req LEN | Rsp payload       |
+@@ -56,10 +67,17 @@ CRC-8: poly `0x07`, init `0x00`, no reflection, no final XOR
+ | 0x04 | STATUS     | RO     | —     | bit0 LOOP_IN (reads loopback pin)               |
+ | 0x05 | ADC_L      | RO     | —     | ADC[7:0]; **reading ADC_L latches ADC_H**       |
+ | 0x06 | ADC_H      | RO     | —     | ADC[9:8] (bits 7..2 always 0); latched value    |
+-| 0x07 | ERR_COUNT  | RO     | 0x00  | request CRC errors, saturates at 0xFF           |
++| 0x07 | ERR_COUNT  | RO     | 0x00  | CRC + framing errors, saturates at 0xFF         |
+ 
+ The latch rule makes reading ADC_L and then ADC_H return one consistent
+ 10-bit sample, even while the ADC keeps converting.
+ 
+ Loopback: on hardware, a jumper connects the LOOP_OUT pin to the LOOP_IN pin.
+ When the jumper is in place, STATUS.bit0 follows CTRL.bit1.
++
++## Idempotency
++
++Every command is idempotent: sending it twice leaves the DUT in the same state
++as sending it once. ERR_COUNT and the ADC latch are the only side effects, and
++they are diagnostic. So a host can safely retry after a timeout, even if the
++first attempt was actually executed.
+diff --git a/docs/test_plan.md b/docs/test_plan.md
+index beaa526..cef77c3 100644
+--- a/docs/test_plan.md
++++ b/docs/test_plan.md
+@@ -1,4 +1,4 @@
+-# VAL01 Test Plan — v0.1
++# VAL01 Test Plan — v0.2
+ 
+ Every DUT test carries its ID via `@pytest.mark.tp("<ID>")`. Targets: `sim`
+ means it runs on the simulator (CI), `hw` means it runs on the Arduino DUT.
+@@ -18,14 +18,39 @@ provide on its own.
+ | PROT-002 | Unknown CMD → BAD_CMD                                   | CMD 0x7E                                       | sim, hw  |
+ | PROT-003 | Wrong LEN for CMD → BAD_LEN                             | 3 malformed lengths                            | sim, hw  |
+ | PROT-004 | DUT resyncs on SOF after line noise                     | garbage prefix before a valid frame            | sim, hw  |
++| PROT-005 | Partial frame discarded after inter-byte gap            | 3 bytes, silence, then a valid frame           | sim, hw  |
++| PROT-006 | LEN > 4 → no response, ERR_COUNT increments             | LEN = 5, 0x20, 0xFF                            | sim, hw  |
+ | GPIO-001 | STATUS.LOOP_IN follows CTRL.LOOP_OUT (jumper fitted)    | toggle 0/1/0/1                                 | sim, hw  |
+ | GPIO-002 | Open loopback does not follow output                    | model with jumper removed                      | sim only |
+ | ADC-001  | ADC value within 0..1023                                | 20 samples                                     | sim, hw  |
+ | ADC-002  | ADC_H bits 7..2 read 0                                  | read after latch                               | sim, hw  |
+ | ADC-003  | ADC_L read latches ADC_H (coherent 10-bit sample)       | ADC changes between byte reads                 | sim only |
+ 
++## Fault injection (link robustness)
++
++Faults are injected by `FaultyTransport` (src/val01/faults.py) between client and DUT.
++
++| ID     | Requirement                                                        | Method                                               |
++|--------|--------------------------------------------------------------------|------------------------------------------------------|
++| FI-001 | Every single link fault is detected when retries=0                 | 4 fault types × 10 seeds, expect an exception        |
++| FI-002 | A single fault is recovered with retries=1                         | per fault type, expect a correct value in 2 attempts |
++| FI-003 | Retries exhausted → exception, not a value                         | 3 drops with retries=2                               |
++| FI-004 | Real DUT errors (e.g. BAD_ADDR) are not retried                    | invalid address with retries=3                       |
++| FI-005 | Soak: zero silent corruption, ≥99% completion                      | 2000 random ops, 20% fault rate, retries=3           |
++| FI-006 | Late/stale response is not consumed by the next transaction        | unread response in RX buffer                         |
++
++Expected give-up rate in FI-005 is about p^(r+1) = 0.2^4 = 0.16%, or about 3 of 2000.
++
++### Defect found by fault injection
++
++**DEF-001 — DUT answered BAD_LEN to a corrupted frame.** A single bit flip in LEN
++(0x00 → 0x20) made the DUT answer `BAD_LEN` before checking the CRC. The host
++received what looked like a legitimate rejection and did not retry. In soak,
++14 of 16 failures traced back to this.
++Found by FI-001 (seed 5, flip_req) and the soak-count mismatch.
++Fix: oversize-LEN frames are dropped silently and counted (PROT-006). The soak now
++fails on any non-link DUT status, so this class of defect cannot come back unnoticed.
++
+ ## Planned (next steps)
+ 
+-- Fault injection on the link: bit flips, dropped/truncated responses, delays → host detects every one of them and never accepts a corrupted value.
+-- Timeout/retry policy in the client.
+ - HW target: SerialTransport, Arduino firmware, ADC limits with a known reference (e.g. a voltage divider).
+diff --git a/src/val01/client.py b/src/val01/client.py
+index cc10d4a..505236f 100644
+--- a/src/val01/client.py
++++ b/src/val01/client.py
+@@ -2,6 +2,8 @@
+ 
+ from __future__ import annotations
+ 
++from collections import Counter
++
+ from .protocol import HEADER_LEN, Cmd, ProtocolError, Response, Status, build_request, parse_response
+ from .registers import Reg
+ from .transport import Transport
+@@ -21,8 +23,18 @@ class DutTimeout(Exception):
+ 
+ 
+ class DutClient:
+-    def __init__(self, transport: Transport):
++    """
++    retries: extra attempts after a link-level failure (timeout, corrupted
++    response, or BAD_CRC meaning the request was corrupted). Retrying is safe
++    because every command is idempotent (docs/protocol.md). Other error
++    statuses are real DUT answers and are never retried.
++    Default 0, so conformance tests see raw DUT behavior.
++    """
++
++    def __init__(self, transport: Transport, retries: int = 0):
+         self.t = transport
++        self.retries = retries
++        self.stats: Counter[str] = Counter()
+ 
+     # ---- low level -----------------------------------------------------
+     def send_raw(self, frame: bytes) -> Response:
+@@ -38,7 +50,24 @@ class DutClient:
+         return parse_response(header + rest)
+ 
+     def _transact(self, cmd: Cmd, addr: int, payload: bytes = b"") -> Response:
+-        rsp = self.send_raw(build_request(cmd, addr, payload))
++        frame = build_request(cmd, addr, payload)
++        for _ in range(self.retries + 1):
++            self.stats["attempts"] += 1
++            try:
++                rsp = self.send_raw(frame)
++            except (DutTimeout, ProtocolError) as exc:
++                self.stats[type(exc).__name__] += 1
++                last_exc: Exception = exc
++                continue
++            if rsp.status == Status.BAD_CRC:
++                self.stats["BAD_CRC"] += 1
++                last_exc = DutError(rsp.status, addr)
++                continue
++            break
++        else:
++            self.stats["gave_up"] += 1
++            raise last_exc
++
+         if rsp.addr != (addr & 0xFF):
+             raise ProtocolError(f"addr echo mismatch: sent 0x{addr:02X}, got 0x{rsp.addr:02X}")
+         if rsp.status != Status.OK:
+diff --git a/src/val01/faults.py b/src/val01/faults.py
+new file mode 100644
+index 0000000..0ff34e0
+--- /dev/null
++++ b/src/val01/faults.py
+@@ -0,0 +1,84 @@
++"""Link-level fault injection.
++
++FaultyTransport wraps any Transport and corrupts traffic in the ways a real
++serial link fails. It picks one fault per transaction (one write() followed
++by its reads), either from a script (deterministic tests) or at random
++from a seeded RNG (soak tests).
++
++The random mode assumes the whole response is available right after
++write(), which holds for SimTransport. On real hardware the link produces
++its own faults.
++"""
++
++from __future__ import annotations
++
++import random
++from collections import Counter
++from enum import Enum
++from typing import Iterable
++
++from .transport import Transport
++
++
++class Fault(Enum):
++    NONE = "none"
++    FLIP_REQ = "flip_req"  # single bit flip in request, SOF excluded
++    FLIP_RSP = "flip_rsp"  # single bit flip in response, SOF excluded
++    TRUNCATE_RSP = "truncate_rsp"  # response loses its tail
++    DROP_RSP = "drop_rsp"  # no response at all
++
++
++class FaultyTransport(Transport):
++    def __init__(
++        self,
++        inner: Transport,
++        script: Iterable[Fault] | None = None,
++        rate: float = 0.0,
++        seed: int = 0,
++    ):
++        self.inner = inner
++        self._script = list(script) if script is not None else None
++        self.rate = rate
++        self.rng = random.Random(seed)
++        self.injected: Counter[Fault] = Counter()
++        self._rx = bytearray()
++
++    def _next_fault(self) -> Fault:
++        if self._script is not None:
++            return self._script.pop(0) if self._script else Fault.NONE
++        if self.rng.random() < self.rate:
++            return self.rng.choice([f for f in Fault if f is not Fault.NONE])
++        return Fault.NONE
++
++    def _flip(self, data: bytes) -> bytes:
++        buf = bytearray(data)
++        i = self.rng.randrange(1, len(buf))  # keep SOF intact
++        buf[i] ^= 1 << self.rng.randrange(8)
++        return bytes(buf)
++
++    def write(self, data: bytes) -> None:
++        fault = self._next_fault()
++        self.injected[fault] += 1
++        if fault is Fault.FLIP_REQ:
++            data = self._flip(data)
++        self.inner.write(data)
++
++        rsp = self.inner.read(4096)
++        if rsp and fault is Fault.FLIP_RSP:
++            rsp = self._flip(rsp)
++        elif rsp and fault is Fault.TRUNCATE_RSP:
++            rsp = rsp[: self.rng.randrange(len(rsp))]
++        elif fault is Fault.DROP_RSP:
++            rsp = b""
++        self._rx += rsp
++
++    def read(self, n: int) -> bytes:
++        chunk, self._rx = bytes(self._rx[:n]), self._rx[n:]
++        return chunk
++
++    def flush_input(self) -> None:
++        self._rx.clear()
++        self.inner.flush_input()
++
++    def close(self) -> None:
++        self.inner.close()
+diff --git a/src/val01/sim_dut.py b/src/val01/sim_dut.py
+index 8e068f8..d85e074 100644
+--- a/src/val01/sim_dut.py
++++ b/src/val01/sim_dut.py
+@@ -44,6 +44,13 @@ class SimDut:
+         return self._regs[addr]
+ 
+     # ---- frame handling ------------------------------------------------
++    def _count_error(self) -> None:
++        self._regs[Reg.ERR_COUNT] = min(self._regs[Reg.ERR_COUNT] + 1, 0xFF)
++
++    def on_idle(self) -> None:
++        """Inter-byte timeout expired: drop any partially received frame."""
++        self._rx.clear()
++
+     def feed(self, data: bytes) -> bytes:
+         """Push received bytes in; return any response bytes produced."""
+         out = bytearray()
+@@ -54,7 +61,10 @@ class SimDut:
+             if len(self._rx) >= HEADER_LEN:
+                 length = self._rx[3]
+                 if length > MAX_PAYLOAD:
+-                    out += build_response(Status.BAD_LEN, self._rx[2])
++                    # Can't find the CRC without a valid LEN, so integrity is unknown.
++                    # Never answer an unverified frame: drop it silently, count it,
++                    # and let the host time out and retry.
++                    self._count_error()
+                     self._rx.clear()
+                     continue
+                 if len(self._rx) == HEADER_LEN + length + 1:
+@@ -66,7 +76,7 @@ class SimDut:
+         cmd, addr, length = frame[1], frame[2], frame[3]
+         payload = frame[4:-1]
+         if crc8(frame[1:-1]) != frame[-1]:
+-            self._regs[Reg.ERR_COUNT] = min(self._regs[Reg.ERR_COUNT] + 1, 0xFF)
++            self._count_error()
+             return build_response(Status.BAD_CRC, addr)
+ 
+         if cmd == Cmd.RESET:
+diff --git a/src/val01/transport.py b/src/val01/transport.py
+index 9726dca..7679bdd 100644
+--- a/src/val01/transport.py
++++ b/src/val01/transport.py
+@@ -32,6 +32,9 @@ class SimTransport(Transport):
+         self._rx = bytearray()
+ 
+     def write(self, data: bytes) -> None:
++        # Timing model: bytes within one write() arrive back to back, and the
++        # gap before each write() is longer than the DUT's inter-byte timeout.
++        self.dut.on_idle()
+         self._rx += self.dut.feed(data)
+ 
+     def read(self, n: int) -> bytes:
+diff --git a/tests/test_fault_injection.py b/tests/test_fault_injection.py
+new file mode 100644
+index 0000000..c53b29b
+--- /dev/null
++++ b/tests/test_fault_injection.py
+@@ -0,0 +1,136 @@
++"""Fault injection: the host must never accept corrupted data.
++
++Every injected fault ends one of two ways. The client recovers through a
++retry, or it raises. It must never return a wrong value.
++"""
++
++import pytest
++
++from val01.client import DutClient, DutError, DutTimeout
++from val01.faults import Fault, FaultyTransport
++from val01.protocol import Cmd, ProtocolError, Status, build_request
++from val01.registers import DEVICE_ID, Reg
++from val01.sim_dut import SimDut
++from val01.transport import SimTransport
++
++pytestmark = pytest.mark.dut
++
++LINK_FAULTS = [Fault.FLIP_REQ, Fault.FLIP_RSP, Fault.TRUNCATE_RSP, Fault.DROP_RSP]
++
++
++def make_client(script=None, rate=0.0, seed=0, retries=0):
++    ft = FaultyTransport(SimTransport(SimDut()), script=script, rate=rate, seed=seed)
++    return DutClient(ft, retries=retries), ft
++
++
++@pytest.mark.tp("FI-001")
++@pytest.mark.parametrize("fault", LINK_FAULTS, ids=lambda f: f.value)
++@pytest.mark.parametrize("seed", range(10))
++def test_fault_detected_without_retry(sim_dut, fault, seed):
++    dut, _ = make_client(script=[fault], seed=seed)
++    with pytest.raises((DutTimeout, ProtocolError, DutError)) as exc:
++        dut.read_reg(Reg.ID)
++    if isinstance(exc.value, DutError):
++        assert exc.value.status == Status.BAD_CRC  # request corruption, caught by the DUT
++
++
++@pytest.mark.tp("FI-002")
++@pytest.mark.parametrize("fault", LINK_FAULTS, ids=lambda f: f.value)
++def test_single_fault_recovered_by_retry(sim_dut, fault):
++    dut, ft = make_client(script=[fault], retries=1)
++    assert dut.read_reg(Reg.ID) == DEVICE_ID
++    assert dut.stats["attempts"] == 2
++    assert ft.injected[fault] == 1
++
++
++@pytest.mark.tp("FI-003")
++def test_retries_exhausted_raises(sim_dut):
++    dut, _ = make_client(script=[Fault.DROP_RSP] * 3, retries=2)
++    with pytest.raises(DutTimeout):
++        dut.read_reg(Reg.ID)
++    assert dut.stats["gave_up"] == 1
++
++
++@pytest.mark.tp("FI-004")
++def test_dut_error_status_not_retried(sim_dut):
++    # BAD_ADDR is a real answer from the DUT, not a link failure. Retrying would hide bugs.
++    dut, _ = make_client(retries=3)
++    with pytest.raises(DutError) as exc:
++        dut.read_reg(0x7F)
++    assert exc.value.status == Status.BAD_ADDR
++    assert dut.stats["attempts"] == 1
++
++
++@pytest.mark.tp("PROT-005")
++def test_dut_drops_partial_frame_after_gap(sim_dut):
++    # A frame cut off mid-way must not glue itself onto the next request
++    dut = DutClient(SimTransport(sim_dut))
++    good = build_request(Cmd.READ, Reg.ID)
++    dut.t.write(good[:3])  # partial frame, then silence
++    rsp = dut.send_raw(good)
++    assert rsp.status == Status.OK and rsp.payload == bytes([DEVICE_ID])
++
++
++@pytest.mark.tp("FI-006")
++def test_late_response_discarded(sim_dut):
++    # A response to an earlier request arrives late and sits in the RX buffer.
++    # The next transaction must not consume it as its own answer.
++    dut = DutClient(SimTransport(sim_dut))
++    dut.write_reg(Reg.SCRATCH, 0x3C)
++    dut.t.write(build_request(Cmd.READ, Reg.ID))  # response left unread = stale
++    assert dut.read_reg(Reg.SCRATCH) == 0x3C
++
++
++@pytest.mark.tp("PROT-006")
++@pytest.mark.parametrize("bad_len", [5, 0x20, 0xFF])
++def test_oversize_len_dropped_silently(sim_dut, bad_len):
++    # An invalid LEN means the CRC can't be located. The DUT must not answer, only count it.
++    dut = DutClient(SimTransport(sim_dut))
++    frame = bytes([0xA5, Cmd.READ, Reg.ID, bad_len, 0x00])
++    with pytest.raises(DutTimeout):
++        dut.send_raw(frame)
++    assert dut.read_reg(Reg.ERR_COUNT) == 1
++
++
++@pytest.mark.tp("FI-005")
++def test_soak_no_silent_corruption(sim_dut):
++    """2000 random transactions at a 20% fault rate with retries=3.
++
++    Pass criteria: zero silently wrong values, and at least 99% of
++    transactions completed.
++    """
++    n, rate = 2000, 0.20
++    dut, ft = make_client(rate=rate, seed=1234, retries=3)
++    rng = ft.rng
++    expected_scratch = 0x00
++    wrong = completed = gave_up = unexpected = 0
++
++    for _ in range(n):
++        try:
++            if rng.random() < 0.5:
++                value = rng.randrange(256)
++                dut.write_reg(Reg.SCRATCH, value)
++                expected_scratch = value
++            else:
++                got = dut.read_reg(Reg.SCRATCH)
++                if expected_scratch is not None and got != expected_scratch:
++                    wrong += 1
++            completed += 1
++        except (DutTimeout, ProtocolError, DutError) as exc:
++            # Under link faults the only legal DUT error is BAD_CRC (after retries ran out).
++            # Any other status means the DUT answered a frame it should have rejected.
++            if isinstance(exc, DutError) and exc.status != Status.BAD_CRC:
++                unexpected += 1
++            gave_up += 1
++            expected_scratch = None  # a failed write may or may not have landed
++
++    print(
++        f"\nsoak: n={n} rate={rate} completed={completed} gave_up={gave_up} "
++        f"unexpected={unexpected} "
++        f"wrong={wrong} injected={dict((f.value, c) for f, c in ft.injected.items())} "
++        f"client={dict(dut.stats)}"
++    )
++    assert wrong == 0, "client returned corrupted data"
++    assert unexpected == 0, "DUT returned a non-link error status under link faults"
++    assert gave_up == dut.stats["gave_up"], "every failure should come from exhausted retries"
++    assert completed / n >= 0.99

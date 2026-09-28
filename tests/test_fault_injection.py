@@ -93,7 +93,7 @@ def test_oversize_len_dropped_silently(sim_dut, bad_len):
 
 
 @pytest.mark.tp("FI-005")
-def test_soak_no_silent_corruption(sim_dut):
+def test_soak_no_silent_corruption(sim_dut, record_property):
     """2000 random transactions at a 20% fault rate with retries=3.
 
     Pass criteria: zero silently wrong values, and at least 99% of
@@ -130,6 +130,12 @@ def test_soak_no_silent_corruption(sim_dut):
         f"wrong={wrong} injected={dict((f.value, c) for f, c in ft.injected.items())} "
         f"client={dict(dut.stats)}"
     )
+    for key, val in {
+        "transactions": n, "fault_rate": rate, "completed": completed, "gave_up": gave_up,
+        "expected_gave_up": round(n * rate ** (dut.retries + 1), 1), "wrong": wrong,
+        "faults_injected": sum(c for f, c in ft.injected.items() if f is not Fault.NONE),
+    }.items():
+        record_property(key, val)
     assert wrong == 0, "client returned corrupted data"
     assert unexpected == 0, "DUT returned a non-link error status under link faults"
     assert gave_up == dut.stats["gave_up"], "every failure should come from exhausted retries"

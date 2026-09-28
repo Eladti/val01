@@ -22,7 +22,17 @@ python -m venv .venv && source .venv/bin/activate
 pip install -e ".[dev]"
 pytest                    # simulator target
 pytest -m dut -v          # DUT tests only
+pytest --report           # + reports/report.html, results.json, summary.md
 ```
+
+## Test report
+
+`pytest --report` writes a traceability report. It joins every requirement in
+`docs/test_plan.md` with the tests tagged `@pytest.mark.tp("<ID>")` and gives
+each requirement a verdict: PASS / FAIL / SKIPPED / NOT COVERED / N/A / ORPHAN.
+CI runs with `--strict-trace`, so a requirement without a test, or a test
+without a requirement, fails the build just like a failing test does. The
+report is published as the job summary and uploaded as a build artifact.
 
 ## Docs
 
@@ -34,4 +44,4 @@ pytest -m dut -v          # DUT tests only
 - [x] Protocol spec, simulator, client, target-agnostic tests, CI
 - [x] Fault injection & client retry policy (found and fixed DEF-001, see test plan)
 - [ ] Arduino firmware + hardware-in-the-loop runs
-- [ ] Test report generation
+- [x] Test report with requirement traceability, CI job summary + artifact

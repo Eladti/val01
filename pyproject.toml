@@ -17,7 +17,7 @@ where = ["src"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
-addopts = "-ra --strict-markers"
+addopts = "-ra --strict-markers -p val01.report"
 markers = [
     "unit: host-side framework tests, no DUT",
     "dut: tests that exercise a DUT",
