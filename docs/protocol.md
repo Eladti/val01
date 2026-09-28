@@ -1,8 +1,8 @@
-# VAL01 DUT Protocol Specification — v0.2
+# VAL01 DUT Protocol Specification — v0.3
 
 Single source of truth for the host ↔ DUT link. The Python simulator
-(`src/val01/sim_dut.py`) and the Arduino firmware (later) both implement
-exactly this document. If behavior and spec disagree, that is a bug.
+(`src/val01/sim_dut.py`) and the Arduino firmware
+(`firmware/val01_dut/val01_dut.ino`) both implement exactly this document. If behavior and spec disagree, that is a bug.
 
 ## Physical link
 
@@ -72,8 +72,9 @@ CRC-8: poly `0x07`, init `0x00`, no reflection, no final XOR
 The latch rule makes reading ADC_L and then ADC_H return one consistent
 10-bit sample, even while the ADC keeps converting.
 
-Loopback: on hardware, a jumper connects the LOOP_OUT pin to the LOOP_IN pin.
-When the jumper is in place, STATUS.bit0 follows CTRL.bit1.
+Loopback: a jumper connects LOOP_OUT (D7) to LOOP_IN (D8). LOOP_IN has its
+internal pull-up enabled. With the jumper fitted, STATUS.bit0 follows CTRL.bit1.
+With the jumper removed, STATUS.bit0 reads 1 whatever CTRL.bit1 is.
 
 ## Idempotency
 

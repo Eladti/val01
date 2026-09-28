@@ -4,6 +4,8 @@ Every injected fault ends one of two ways. The client recovers through a
 retry, or it raises. It must never return a wrong value.
 """
 
+import time
+
 import pytest
 
 from val01.client import DutClient, DutError, DutTimeout
@@ -62,30 +64,29 @@ def test_dut_error_status_not_retried(sim_dut):
 
 
 @pytest.mark.tp("PROT-005")
-def test_dut_drops_partial_frame_after_gap(sim_dut):
+def test_dut_drops_partial_frame_after_gap(dut):
     # A frame cut off mid-way must not glue itself onto the next request
-    dut = DutClient(SimTransport(sim_dut))
     good = build_request(Cmd.READ, Reg.ID)
-    dut.t.write(good[:3])  # partial frame, then silence
+    dut.t.write(good[:3])  # partial frame...
+    time.sleep(0.05)  # ...then silence longer than the 20 ms inter-byte timeout
     rsp = dut.send_raw(good)
     assert rsp.status == Status.OK and rsp.payload == bytes([DEVICE_ID])
 
 
 @pytest.mark.tp("FI-006")
-def test_late_response_discarded(sim_dut):
+def test_late_response_discarded(dut):
     # A response to an earlier request arrives late and sits in the RX buffer.
     # The next transaction must not consume it as its own answer.
-    dut = DutClient(SimTransport(sim_dut))
     dut.write_reg(Reg.SCRATCH, 0x3C)
     dut.t.write(build_request(Cmd.READ, Reg.ID))  # response left unread = stale
+    time.sleep(0.05)  # let it arrive (real links are not instantaneous)
     assert dut.read_reg(Reg.SCRATCH) == 0x3C
 
 
 @pytest.mark.tp("PROT-006")
 @pytest.mark.parametrize("bad_len", [5, 0x20, 0xFF])
-def test_oversize_len_dropped_silently(sim_dut, bad_len):
+def test_oversize_len_dropped_silently(dut, bad_len):
     # An invalid LEN means the CRC can't be located. The DUT must not answer, only count it.
-    dut = DutClient(SimTransport(sim_dut))
     frame = bytes([0xA5, Cmd.READ, Reg.ID, bad_len, 0x00])
     with pytest.raises(DutTimeout):
         dut.send_raw(frame)

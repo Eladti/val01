@@ -3,7 +3,6 @@
 import pytest
 
 from val01.client import DutClient
-from val01.registers import Reg
 from val01.sim_dut import SimDut
 from val01.transport import SimTransport
 
@@ -18,10 +17,3 @@ def test_adc_latch_gives_coherent_sample(sim_dut):
     dut = DutClient(SimTransport(SimDut(adc_source=lambda: next(samples))))
     assert dut.read_adc() == 0x0FF
 
-
-@pytest.mark.tp("GPIO-002")
-def test_loopback_open_reads_low(sim_dut):
-    # Jumper removed: input must not follow output
-    dut = DutClient(SimTransport(SimDut(loopback_wired=False)))
-    dut.write_reg(Reg.CTRL, 0x02)
-    assert dut.read_reg(Reg.STATUS) == 0

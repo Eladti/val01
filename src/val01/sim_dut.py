@@ -33,7 +33,8 @@ class SimDut:
 
     def _read(self, addr: int) -> int:
         if addr == Reg.STATUS:
-            loop_in = self.loopback_wired and bool(self._regs[Reg.CTRL] & CTRL_LOOP_OUT)
+            # Jumper fitted: input follows output. Open: the internal pull-up reads HIGH.
+            loop_in = bool(self._regs[Reg.CTRL] & CTRL_LOOP_OUT) if self.loopback_wired else True
             return STATUS_LOOP_IN if loop_in else 0
         if addr == Reg.ADC_L:
             sample = self._adc_source() & ADC_MAX

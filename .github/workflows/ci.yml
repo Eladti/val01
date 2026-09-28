@@ -27,3 +27,24 @@ jobs:
         with:
           name: val01-report-py${{ matrix.python }}
           path: reports/
+
+  test-fw:
+    # The Arduino sketch compiled for the host (g++ -Werror) and driven over a
+    # pseudo-terminal by the same test suite. Real firmware logic, no board.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: pip install -e ".[dev,hw]"
+      - name: Run tests (fw target)
+        run: pytest --target fw --report --strict-trace --junitxml=reports/junit.xml
+      - name: Publish job summary
+        if: always()
+        run: cat reports/summary.md >> "$GITHUB_STEP_SUMMARY" || echo "no summary produced" >> "$GITHUB_STEP_SUMMARY"
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: val01-report-fw
+          path: reports/

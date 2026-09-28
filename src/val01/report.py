@@ -85,7 +85,8 @@ def trace(plan: dict[str, PlanItem], results: list[TestResult], target: str) -> 
     rows = []
     for pid, item in plan.items():
         tests = by_id.get(pid, [])
-        rows.append(_row(pid, item.requirement, tests, target in item.targets))
+        applies = target in item.targets or (target == "fw" and "hw" in item.targets)
+        rows.append(_row(pid, item.requirement, tests, applies))
     for pid in sorted(set(by_id) - set(plan)):
         row = _row(pid, "(not in test plan)", by_id[pid], True)
         row["verdict"] = "ORPHAN"

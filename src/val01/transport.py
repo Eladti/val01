@@ -1,11 +1,13 @@
 """Byte-level transports. Tests never touch these directly — only DutClient does.
 
 SimTransport: in-process simulator (CI).
-SerialTransport: real UART to the Arduino (added in the HW step).
+SerialTransport: a serial port. Used for the real Arduino (target hw) and for the
+host-compiled firmware behind a pseudo-terminal (target fw).
 """
 
 from __future__ import annotations
 
+import time
 from abc import ABC, abstractmethod
 
 from .sim_dut import SimDut
@@ -43,3 +45,42 @@ class SimTransport(Transport):
 
     def flush_input(self) -> None:
         self._rx.clear()
+
+
+class SerialTransport(Transport):
+    """
+    boot_delay: opening the port on an Uno/Nano pulses DTR, which resets the
+    board. The bootloader then runs for about 1.5 s and drops any bytes sent
+    to it. Wait, then discard whatever arrived during boot.
+    """
+
+    def __init__(self, port: str, baud: int = 115200, timeout: float = 0.3, boot_delay: float = 2.0):
+        try:
+            import serial  # pyserial
+        except ImportError as exc:
+            raise RuntimeError('pyserial is required: pip install -e ".[hw]"') from exc
+        try:
+            self.ser = serial.Serial(port, baud, timeout=timeout)
+        except serial.SerialException as exc:
+            raise RuntimeError(
+                f"cannot open {port}: {exc}\n"
+                "  - is the board plugged in?  ls /dev/ttyACM* /dev/ttyUSB*\n"
+                "  - permission denied?        sudo usermod -aG dialout $USER  (then log out/in)\n"
+                "  - port busy?                close the Arduino IDE Serial Monitor"
+            ) from exc
+        if boot_delay:
+            time.sleep(boot_delay)
+        self.ser.reset_input_buffer()
+
+    def write(self, data: bytes) -> None:
+        self.ser.write(data)
+        self.ser.flush()
+
+    def read(self, n: int) -> bytes:
+        return self.ser.read(n)
+
+    def flush_input(self) -> None:
+        self.ser.reset_input_buffer()
+
+    def close(self) -> None:
+        self.ser.close()

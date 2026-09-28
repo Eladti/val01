@@ -1,9 +1,14 @@
-# VAL01 Test Plan — v0.2
+# VAL01 Test Plan — v0.3
 
-Every DUT test carries its ID via `@pytest.mark.tp("<ID>")`. Targets: `sim`
-means it runs on the simulator (CI), `hw` means it runs on the Arduino DUT.
-Tests marked sim-only need control over DUT inputs that hardware can't
-provide on its own.
+Every DUT test carries its ID via `@pytest.mark.tp("<ID>")`.
+
+Targets:
+- `sim`: Python behavioral model (CI)
+- `fw`: the Arduino firmware compiled for the host and driven over a pseudo-terminal (CI).
+  It runs every item that applies to `hw`.
+- `hw`: the firmware on a physical board ([hw_setup.md](hw_setup.md))
+
+Sim-only items need control over DUT inputs that hardware can't provide on its own.
 
 | ID       | Requirement (docs/protocol.md)                          | Method                                         | Targets  |
 |----------|---------------------------------------------------------|------------------------------------------------|----------|
@@ -21,7 +26,7 @@ provide on its own.
 | PROT-005 | Partial frame discarded after inter-byte gap            | 3 bytes, silence, then a valid frame           | sim, hw  |
 | PROT-006 | LEN > 4 → no response, ERR_COUNT increments             | LEN = 5, 0x20, 0xFF                            | sim, hw  |
 | GPIO-001 | STATUS.LOOP_IN follows CTRL.LOOP_OUT (jumper fitted)    | toggle 0/1/0/1                                 | sim, hw  |
-| GPIO-002 | Open loopback does not follow output                    | model with jumper removed                      | sim only |
+| GPIO-002 | Jumper removed: LOOP_IN reads HIGH (pull-up) regardless | CTRL 0 / LOOP_OUT, jumper out (hw: `--jumper-removed`) | sim, fw, hw |
 | ADC-001  | ADC value within 0..1023                                | 20 samples                                     | sim, hw  |
 | ADC-002  | ADC_H bits 7..2 read 0                                  | read after latch                               | sim, hw  |
 | ADC-003  | ADC_L read latches ADC_H (coherent 10-bit sample)       | ADC changes between byte reads                 | sim only |
@@ -51,6 +56,15 @@ Found by FI-001 (seed 5, flip_req) and the soak-count mismatch.
 Fix: oversize-LEN frames are dropped silently and counted (PROT-006). The soak now
 fails on any non-link DUT status, so this class of defect cannot come back unnoticed.
 
+### Model/hardware divergence found while porting to firmware
+
+**DEF-002 — the simulator's open-loopback behavior didn't match the hardware.** The
+model returned LOOP_IN = 0 with the jumper removed. On the board, LOOP_IN uses
+the AVR internal pull-up, so it reads 1. The model was wrong, not the firmware.
+Fix: sim and spec now model the pull-up. GPIO-002 runs on `sim` and on `fw`
+(firmware process started with the jumper "removed").
+
 ## Planned (next steps)
 
-- HW target: SerialTransport, Arduino firmware, ADC limits with a known reference (e.g. a voltage divider).
+- First run on a physical board (`hw`); record results against the `fw` baseline.
+- ADC limits against a known reference (voltage divider on A0).

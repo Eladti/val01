@@ -128,3 +128,11 @@ def test_adc_in_range(dut):
 def test_adc_high_byte_reserved_bits_zero(dut):
     dut.read_reg(Reg.ADC_L)
     assert dut.read_reg(Reg.ADC_H) & 0xFC == 0
+
+
+@pytest.mark.tp("GPIO-002")
+@pytest.mark.parametrize("ctrl", [0, CTRL_LOOP_OUT])
+def test_loopback_open_reads_pullup(dut_no_jumper, ctrl):
+    # Jumper removed: LOOP_IN is held HIGH by its pull-up whatever LOOP_OUT does
+    dut_no_jumper.write_reg(Reg.CTRL, ctrl)
+    assert dut_no_jumper.read_reg(Reg.STATUS) & STATUS_LOOP_IN
