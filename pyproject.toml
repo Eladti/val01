@@ -1,0 +1,25 @@
+[build-system]
+requires = ["setuptools>=64"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "val01"
+version = "0.1.0"
+description = "Validation Automation Rig — pytest framework for register-level DUT validation (simulated + hardware-in-the-loop)"
+requires-python = ">=3.10"
+dependencies = []
+
+[project.optional-dependencies]
+dev = ["pytest>=7"]
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-ra --strict-markers"
+markers = [
+    "unit: host-side framework tests, no DUT",
+    "dut: tests that exercise a DUT",
+    "tp(id): test-plan ID from docs/test_plan.md",
+]
